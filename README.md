@@ -7,7 +7,7 @@ Closed adaptive optics (AO) loop: known aberrated wavefront goes in, a sensor me
 
 ## Outputs
 
-![iteration 1](figures/zernike_it1.png)
+![iteration 1](images/zernike_it1.png)
 *Truth vs. reconstructed wavefront and recovered Zernike coefficients.*
 
 ## 1. Wavefronts
