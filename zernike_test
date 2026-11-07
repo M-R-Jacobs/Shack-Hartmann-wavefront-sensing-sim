@@ -1,0 +1,153 @@
+# Crude wavefront sensor sim
+# aberrated wavefront -> lenslets measure local slopes like a differential -> least squares recovers Zernike coeff
+
+import math
+import numpy as numpy
+import matplotlib.pyplot as mpl
+
+
+
+# Pupil grid
+N = 128 # pixels across the pupil
+coords = numpy.linspace(-1, 1, N) # normalized pupil coordinates, radius = 1
+x, y = numpy.meshgrid(coords, coords)
+rho = numpy.sqrt(x**2 + y**2)
+theta = numpy.arctan2(y, x)
+mask = rho <= 1 # True inside the circular pupil
+dx = coords[1] - coords[0] # pixel spacing, needed for gradients
+
+
+
+# Zernike polynomials (Noll ordering)
+def noll_to_nm(j):
+    n = int((math.sqrt(8*(j - 1) + 1) - 1) / 2) # radial order
+    p = j - n*(n + 1)//2 # position of j within order n
+    k = n % 2
+    m = 2*((p + k)//2) - k # |m|
+    if m != 0 and j % 2 == 1: # odd j -> sine term, negative m
+        m = -m
+    return n, m
+
+def zernike(j, rho, theta):
+    n, m = noll_to_nm(j)
+    m_abs = abs(m)
+    R = numpy.zeros_like(rho)
+    for k in range((n - m_abs)//2 + 1): # radial polynomial sum
+        coeff = (-1)**k * math.factorial(n - k) / (
+            math.factorial(k)
+            * math.factorial((n + m_abs)//2 - k)
+            * math.factorial((n - m_abs)//2 - k)
+        )
+        R = R + coeff * rho**(n - 2*k)
+    if m == 0:
+        return math.sqrt(n + 1) * R
+    elif m > 0:
+        return math.sqrt(2*(n + 1)) * R * numpy.cos(m * theta)
+    else:
+        return math.sqrt(2*(n + 1)) * R * numpy.sin(m_abs * theta)
+    # evaluated everywhere on the grid (not just inside the pupil) so gradients have no fake edge at rho = 1
+
+
+
+# Truth wavefront
+J = 15 # number of modes in the model (Noll 1 to 15)
+modes = range(2, J + 1) # skip piston: slopes can't see it
+rng = numpy.random.default_rng(1)
+a_true = rng.normal(0, 0.1, len(modes)) # waves RMS per mode
+a_true = a_true / numpy.arange(2, J + 1)**0.5 # crude falloff: higher order = smaller, like real optics
+
+Z = {j: zernike(j, rho, theta) for j in modes} # dictionary of mode maps
+W = sum(a * Z[j] for a, j in zip(a_true, modes)) # wavefront in waves
+
+
+
+# Lenslet array: split the pupil into n_sub x n_sub subapertures
+n_sub = 8
+pix = N // n_sub # pixels per subaperture
+valid = [] # (row, col) of subapertures that are mostly inside the pupil
+for r in range(n_sub):
+    for c in range(n_sub):
+        block = mask[r*pix:(r + 1)*pix, c*pix:(c + 1)*pix]
+        if block.mean() > 0.5:
+            valid.append((r, c))
+
+
+
+# Sensor model: each lenslet reports the average x and y slope of the wavefront over its subaperture
+def measure_slopes(wavefront):
+    gy, gx = numpy.gradient(wavefront, dx) # numpy returns d/drow (y) first, then d/dcol (x)
+    sx, sy = [], []
+    for r, c in valid:
+        sl = (slice(r*pix, (r + 1)*pix), slice(c*pix, (c + 1)*pix))
+        inside = mask[sl] # only average over illuminated pixels
+        sx.append(gx[sl][inside].mean())
+        sy.append(gy[sl][inside].mean())
+    return numpy.concatenate([sx, sy]) # stacked slope vector s = [all x slopes, all y slopes]
+
+noise = 0.01 # slope noise (waves per unit radius), stands in for centroid error
+s = measure_slopes(W) + rng.normal(0, noise, 2*len(valid))
+
+
+
+# Interaction matrix: column j = slope pattern from one unit Zernike mode
+G = numpy.column_stack([measure_slopes(Z[j]) for j in modes])
+
+# Reconstruction: least squares via pseudoinverse
+a_hat = numpy.linalg.pinv(G) @ s
+W_hat = sum(a * Z[j] for a, j in zip(a_hat, modes))
+
+rms_true = numpy.sqrt(numpy.sum(a_true**2))
+rms_err = numpy.sqrt(numpy.sum((a_hat - a_true)**2))
+print(f'Valid subapertures: {len(valid)}  |  slopes: {len(s)}  |  modes: {len(a_true)}')
+print(f'True RMS wavefront error: {rms_true:.4f} waves')
+print(f'Reconstruction error:     {rms_err:.4f} waves')
+
+
+
+# Plots
+W_plot = numpy.where(mask, W, numpy.nan) # NaN outside pupil so it plots blank
+W_hat_plot = numpy.where(mask, W_hat, numpy.nan)
+vmax = numpy.nanmax(numpy.abs(W_plot))
+
+fig, axs = mpl.subplots(2, 2, figsize=(11, 9))
+
+im = axs[0, 0].imshow(W_plot, cmap='RdBu_r', vmin=-vmax, vmax=vmax, extent=[-1, 1, -1, 1], origin='lower')
+axs[0, 0].set_title('True wavefront (waves)')
+fig.colorbar(im, ax=axs[0, 0])
+
+# Spot pattern: reference spot at each lenslet center, measured spot displaced by f * slope
+f_scale = 0.15 # exaggerated focal length so the shifts are visible
+centers = numpy.array([(-1 + (c + 0.5)*2/n_sub, -1 + (r + 0.5)*2/n_sub) for r, c in valid])
+n_v = len(valid)
+spots = centers + f_scale * numpy.column_stack([s[:n_v], s[n_v:]])
+axs[0, 1].scatter(centers[:, 0], centers[:, 1], marker='+', color='gray', label='reference (flat)')
+axs[0, 1].scatter(spots[:, 0], spots[:, 1], s=12, color='crimson', label='measured spot')
+for k in range(1, n_sub): # lenslet boundaries
+    edge = -1 + k*2/n_sub
+    axs[0, 1].axvline(edge, color='lightgray', lw=0.5)
+    axs[0, 1].axhline(edge, color='lightgray', lw=0.5)
+axs[0, 1].add_patch(mpl.Circle((0, 0), 1, fill=False, color='black'))
+axs[0, 1].set_xlim(-1, 1)
+axs[0, 1].set_ylim(-1, 1)
+axs[0, 1].set_aspect('equal')
+axs[0, 1].set_title('Shack-Hartmann spot pattern')
+axs[0, 1].legend(loc='lower right', fontsize=8)
+
+im = axs[1, 0].imshow(W_hat_plot, cmap='RdBu_r', vmin=-vmax, vmax=vmax, extent=[-1, 1, -1, 1], origin='lower')
+axs[1, 0].set_title('Reconstructed wavefront (waves)')
+fig.colorbar(im, ax=axs[1, 0])
+
+idx = numpy.arange(len(a_true))
+axs[1, 1].bar(idx - 0.2, a_true, width=0.4, label='true')
+axs[1, 1].bar(idx + 0.2, a_hat, width=0.4, label='reconstructed')
+axs[1, 1].set_xticks(idx)
+axs[1, 1].set_xticklabels([str(j) for j in modes])
+axs[1, 1].set_xlabel('Noll index j')
+axs[1, 1].set_ylabel('Coefficient (waves)')
+axs[1, 1].set_title('Zernike coefficients')
+axs[1, 1].legend()
+axs[1, 1].axhline(0, color='black', lw=0.5)
+
+mpl.tight_layout()
+mpl.savefig('shwfs_crude.png', dpi=110)
+mpl.show()
