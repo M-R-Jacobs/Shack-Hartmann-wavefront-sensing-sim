@@ -5,6 +5,11 @@ Closed adaptive optics (AO) loop: known aberrated wavefront goes in, a sensor me
 
 ---
 
+## Outputs
+
+![iteration 1](figures/zernike_it1.png)
+*Truth vs. reconstructed wavefront and recovered Zernike coefficients.*
+
 ## 1. Wavefronts
 
 A perfect point source emitting isotropically arrives at distant telescopes as a plane wave. Every point across the aperture has the same phase. Complications like atmospheric turbulence, misaligned optics, thermal distortion, and figure errors on mirrors all delay some parts of the beam more than others. The wavefront error, here called $W(x,y)$ is the optical path difference (OPD) from a theoretical reference surface (units of length). The corresponding phase error is:
